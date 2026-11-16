@@ -201,6 +201,32 @@ def resolve_clone_dir(db, name: str, url: str) -> Path:
     return REPOS_ROOT / f"{name}-{suffix}"
 
 
+def remove_clone_dir(path: Path) -> bool:
+    """删除仓库克隆目录；只允许删除 data/repos 下的目录，避免误删其他路径。"""
+    try:
+        resolved = path.resolve()
+        root = REPOS_ROOT.resolve()
+    except OSError:
+        return False
+    if resolved == root or not resolved.is_relative_to(root):
+        print(f"[清理] 拒绝删除仓库目录之外的路径：{resolved}")
+        return False
+    if not resolved.exists():
+        return False
+    _rmtree(resolved)
+    return not resolved.exists()
+
+
+def delete_repo_vectors(repo_id: int) -> bool:
+    """删除某仓库的全部向量；返回是否成功，失败只记录日志。"""
+    try:
+        _delete_vectors(_new_chroma_collection(), repo_id)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"[清理] 删除向量失败 repo_id={repo_id}: {exc}")
+        return False
+
+
 def _new_chroma_collection():
     client = get_chroma_client(settings.chroma_dir)
     return get_or_create_collection(client)

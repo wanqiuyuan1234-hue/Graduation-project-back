@@ -105,3 +105,39 @@ class RepoJob(Base):
         Index("idx_repo_job_repo", "repo_id"),
         Index("idx_repo_job_status", "status"),
     )
+
+
+class ChatSession(Base):
+    """问答会话：repo_id 为空表示“所有仓库”，非空表示创建时锁定的单个仓库。"""
+
+    __tablename__ = "chat_session"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    title = Column(String(255), nullable=False, server_default=text("'新会话'"))
+    repo_id = Column(BigInteger, ForeignKey("repo.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    __table_args__ = (Index("idx_chat_session_updated", "updated_at"),)
+
+
+class ChatMessage(Base):
+    """会话消息：citations 存检索来源快照，retrieval 存检索调试信息。"""
+
+    __tablename__ = "chat_message"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    session_id = Column(
+        BigInteger, ForeignKey("chat_session.id", ondelete="CASCADE"), nullable=False
+    )
+    role = Column(String(20), nullable=False)
+    content = Column(Text, nullable=False)
+    citations = Column(JSONB)
+    retrieval = Column(JSONB)
+    prompt_tokens = Column(Integer)
+    completion_tokens = Column(Integer)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (Index("idx_chat_message_session", "session_id"),)

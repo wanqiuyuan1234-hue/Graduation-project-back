@@ -53,12 +53,44 @@ class Settings(BaseSettings):
     # embedding 批大小，控制单次内存占用
     embed_batch_size: int = 16
 
+    # ---- 对话检索（向量 + 标识符关键词 RRF 融合，不重排）----
+    retrieval_candidate_k: int = 30
+    retrieval_top_k: int = 6
+    retrieval_vector_weight: float = 0.7
+    retrieval_keyword_weight: float = 0.3
+    retrieval_min_score: float = 0.30
+    # 单条来源与全部来源的字符上限（超出按分数丢弃/截断）
+    retrieval_max_source_chars: int = 8000
+    retrieval_max_total_chars: int = 24000
+    # 多轮改写：none（不改写）| rule（规则）| llm（模型改写）
+    chat_rewrite_mode: str = "rule"
+    # 聊天并发上限：入库 worker 与 LLM 流共用 2G 内存，避免同时开太多
+    chat_max_concurrency: int = 2
+
+    # ---- LLM（OpenAI 兼容协议，改地址/Key/模型名即可切换厂商）----
+    llm_base_url: str = ""
+    llm_api_key: str = ""
+    llm_model: str = ""
+    llm_timeout_seconds: int = 60
+    llm_max_tokens: int = 1024
+    llm_temperature: float = 0.2
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @property
     def cors_origin_list(self) -> list[str]:
         """把逗号分隔的跨域白名单拆成列表。"""
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def llm_configured(self) -> bool:
+        """LLM 三个必填项齐全且不是占位值才认为可用，避免半配置/模板值静默发请求。"""
+        if not (self.llm_base_url.strip() and self.llm_api_key.strip() and self.llm_model.strip()):
+            return False
+        key = self.llm_api_key.strip().lower()
+        # .env.example 里的示例值（如 sk-xxxxxxxxxxxxxxxx）不算已配置
+        placeholders = ("xxxx", "your-", "your_", "replace", "changeme", "api-key")
+        return not any(marker in key for marker in placeholders)
 
 
     @property

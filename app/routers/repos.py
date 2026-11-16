@@ -1,21 +1,24 @@
-"""仓库入库接口：提交任务、查询进度、取消。"""
+"""仓库入库接口：提交任务、查询进度、取消、删除。"""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Repo, RepoJob
+from app.models import Chunk, CodeFile, Repo, RepoJob
 from app.schemas.job import JobOut, RepoCreateIn, RepoCreateOut
 from app.services.ingest import (
+    delete_repo_vectors,
     derive_repo_name,
     manager,
+    remove_clone_dir,
     resolve_clone_dir,
     update_job,
 )
@@ -157,3 +160,67 @@ def cancel_job(job_id: int, db: Session = Depends(get_db)):
 
     db.refresh(job)
     return job
+
+
+@router.delete("/repos/{repo_id}")
+def delete_repo(repo_id: int, db: Session = Depends(get_db)):
+    """彻底删除仓库：PG 行、向量、任务记录与磁盘克隆目录。
+
+    覆盖“从未成功入库”的仓库（可能只有 repo 行 + 失败任务，没有文件/切片）。
+    有进行中的任务时拒绝删除，避免删除与入库并发写同一仓库。
+    """
+    repo = db.get(Repo, repo_id)
+    if repo is None:
+        raise HTTPException(status_code=404, detail="仓库不存在")
+
+    active = db.execute(
+        select(RepoJob).where(
+            RepoJob.status.in_(ACTIVE_STATUSES),
+            or_(RepoJob.repo_id == repo_id, RepoJob.repo_url == repo.url),
+        )
+    ).scalars().first()
+    if active is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"该仓库有进行中的任务（job {active.id}，状态 {active.status}），"
+                "请先取消任务再删除"
+            ),
+        )
+
+    # 1) 向量：按 metadata.repo_id 精确删除
+    vectors_removed = delete_repo_vectors(repo_id)
+
+    # 2) PostgreSQL：chunk → code_file → repo_job → repo
+    # 先解除 parent_chunk_id 自引用，避免自外键阻塞批量删除
+    file_ids = list(
+        db.execute(select(CodeFile.id).where(CodeFile.repo_id == repo_id)).scalars()
+    )
+    if file_ids:
+        db.execute(
+            update(Chunk)
+            .where(Chunk.file_id.in_(file_ids))
+            .values(parent_chunk_id=None)
+        )
+        db.execute(delete(Chunk).where(Chunk.file_id.in_(file_ids)))
+    db.execute(delete(CodeFile).where(CodeFile.repo_id == repo_id))
+    # 同时按 url 清理 repo_id 为空的历史任务记录
+    db.execute(
+        delete(RepoJob).where(
+            or_(RepoJob.repo_id == repo_id, RepoJob.repo_url == repo.url)
+        )
+    )
+    clone_dir = repo.clone_dir
+    db.delete(repo)
+    db.commit()
+
+    # 3) 磁盘克隆目录（仅允许 data/repos 下的路径）
+    dir_removed = False
+    if clone_dir:
+        dir_removed = remove_clone_dir(Path(clone_dir))
+
+    return {
+        "deleted": repo_id,
+        "vectors_removed": vectors_removed,
+        "dir_removed": dir_removed,
+    }
